@@ -1,64 +1,64 @@
 package cmd
 
 import (
-	"github.com/migalabs/eth-light-crawler/pkg/config"
-	"github.com/migalabs/eth-light-crawler/pkg/crawler"
+    "github.com/sirupsen/logrus"
+    cli "github.com/urfave/cli/v2"
 
-	log "github.com/sirupsen/logrus"
-	cli "github.com/urfave/cli/v2"
+    "github.com/example/crawler/pkg/config"
+    "github.com/example/crawler/pkg/crawler"
 )
 
 var Discovery5 = &cli.Command{
-	Name:   "discv5",
-	Usage:  "crawl Ethereum's public DHT thought the Discovery 5.1 protocol",
-	Action: RunDiscv5,
-	Flags: []cli.Flag{
-		&cli.StringFlag{
-			Name:    "log-level",
-			Usage:   "verbosity of the logs that will be displayed [debug,warn,info,error]",
-			EnvVars: []string{"IPFS_CID_HOARDER_LOGLEVEL"},
-			Value:   "info",
-		},
-		&cli.StringFlag{
-			Name:     "db-endpoint",
-			Usage:    "login endpoint to the database",
-			EnvVars:  []string{"IPFS_CID_HOARDER_DB_ENDPOINT"},
-			Value:    "postgres://test:password@localhost:5432/eth_light_crawler",
-			Required: true,
-		},
-		&cli.IntFlag{
-			Name:  "port",
-			Usage: "port number that we want to use/advertise in the Ethereum network",
-			Value: 9001,
-		},
-		&cli.BoolFlag{
-			Name:  "reset-db",
-			Usage: "reset the content of the db tables",
-			Value: false,
-		},
-	},
+    Name:   "discv5",
+    Usage:  "crawl Ethereum's public DHT using Discovery v5.1 (Sepolia)",
+    Action: RunDiscv5,
+    Flags: []cli.Flag{
+        &cli.StringFlag{
+            Name:  "log-level",
+            Usage: "verbosity of the logs [debug,warn,info,error]",
+            Value: "info",
+        },
+        &cli.IntFlag{
+            Name:  "port",
+            Usage: "UDP/TCP port to bind for discv5",
+            Value: 9001,
+        },
+    },
 }
 
 func RunDiscv5(ctx *cli.Context) error {
-	// parse the configuration from the flags
-	conf := config.DefaultConfig
-	conf.Apply(ctx)
+    // parse the config
+    conf := config.DefaultConfig
+    conf.Apply(ctx)
 
-	// Create a new crawler
-	crawlr, err := crawler.New(ctx.Context, conf.DBEndpoint, conf.DBPath, conf.UDP, conf.ResetDB)
+    switch ctx.String("log-level") {
+    case "debug":
+        logrus.SetLevel(logrus.DebugLevel)
+    case "warn":
+        logrus.SetLevel(logrus.WarnLevel)
+    case "error":
+        logrus.SetLevel(logrus.ErrorLevel)
+    default:
+        logrus.SetLevel(logrus.InfoLevel)
+    }
 
-	if err != nil {
-		return err
-	}
-	log.WithFields(log.Fields{
-		"peerID":    crawlr.ID(),
-		"IP":        conf.IP,
-		"UDP":       conf.UDP,
-		"TCP":       conf.TCP,
-		"bootnodes": len(config.EthBootonodes),
-		"log-info":  conf.LogLvl,
-	}).Info("Starting discv node")
+    // Create the crawler with no DB usage
+    crawlr, err := crawler.New(
+        ctx.Context,
+        "",         // dbEndpoint not used anymore
+        "sepolia_peerstore.db", // local enode DB file
+        conf.UDP,
+        false,      // resetDB not used
+    )
+    if err != nil {
+        return err
+    }
 
-	// run the crawler for XX time
-	return crawlr.Run(conf.CrawlDuration)
+    logrus.WithFields(logrus.Fields{
+        "peerID":   crawlr.ID(),
+        "UDP":      conf.UDP,
+    }).Info("Starting discv5 crawler for Sepolia")
+
+    // run the crawler until Ctrl+C or context done
+    return crawlr.Run(conf.CrawlDuration)
 }
