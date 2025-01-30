@@ -3,11 +3,13 @@ package crawler
 import (
     "context"
     "encoding/hex"
+    "fmt"
+    "os"
+    "sync"
     "time"
 
     "github.com/migalabs/armiarma/src/utils"
     "github.com/migalabs/eth-light-crawler/pkg/config"
-    "github.com/migalabs/eth-light-crawler/pkg/db"
     "github.com/migalabs/eth-light-crawler/pkg/discv5"
     ut "github.com/migalabs/eth-light-crawler/pkg/utils"
 
@@ -18,10 +20,6 @@ import (
     log "github.com/sirupsen/logrus"
 )
 
-var (
-    EmptyBytes error = errors.New("array of bytes is empty")
-)
-
 type Crawler struct {
     ctx context.Context
 
@@ -30,17 +28,57 @@ type Crawler struct {
 
     ethNode       *enode.LocalNode
     discv5Service *discv5.Discv5Service
-    dbClient      *db.DBClient
 
     enrCache map[enode.ID]uint64
 }
 
+// ---------------------------------------------------
+// ### ADDED FILE LOGIC ###
+// We'll define a global mutex & function for line-based file writes
+// ---------------------------------------------------
+var fileMutex sync.Mutex
+var outputFilename = "sepolia_peers.txt"
+
+// Write the discovered node to a text file with | delimiter
+func saveENRToFile(enr *discv5.EnrNode) {
+    // Build a single line. You can include as many fields as you want:
+    // For example: node_id|ip|tcp|udp|fork_digest|timestamp...
+    // And so on, depending on what you want to store.
+    line := fmt.Sprintf(
+        "%d|%s|%s|%d|%d|%d|%s|%s\n",
+        enr.Timestamp.Unix(),
+        enr.ID.String(),
+        enr.IP.String(),
+        enr.TCP,
+        enr.UDP,
+        enr.Seq,
+        hex.EncodeToString(enr.Attnets.Raw[:]),
+        enr.Eth2Data.ForkDigest.String(),
+    )
+
+    fileMutex.Lock()
+    defer fileMutex.Unlock()
+
+    f, err := os.OpenFile(outputFilename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+    if err != nil {
+        log.Errorf("Error opening output file: %v", err)
+        return
+    }
+    defer f.Close()
+
+    if _, err := f.WriteString(line); err != nil {
+        log.Errorf("Error writing ENR line: %v", err)
+    }
+}
+
+// ---------------------------------------------------
+
 func New(
     ctx context.Context,
-    dbEndpoint string,
+    dbEndpoint string, // not used now
     dbPath string,
     port int,
-    resetDB bool,
+    resetDB bool, // not used
 ) (*Crawler, error) {
     // Generate a new PrivKey
     privK, err := ut.GenNewPrivKey()
@@ -54,25 +92,19 @@ func New(
         return nil, err
     }
 
-    // open the Postgres DB client
-    sqlDB, err := db.NewDBClient(ctx, dbEndpoint, true, resetDB)
-    if err != nil {
-        return nil, err
-    }
-
-    // generate the local enode
+    // Generate local enode
     ethNode := enode.NewLocalNode(enodeDB, privK)
 
-    // track known nodeIDs
     enrCache := make(map[enode.ID]uint64)
 
     // define how we handle newly discovered ENRs
     enrHandler := func(node *enode.Node) {
+        // Basic data parse
         err := node.ValidateComplete()
         if err != nil {
-            log.Warnf("error validating the ENR: %s", err.Error())
+            log.Warnf("error validating ENR: %s", err.Error())
         }
-        // basic fields
+
         id := node.ID()
         seq := node.Seq()
         ip := node.IP()
@@ -80,33 +112,26 @@ func New(
         tcp := node.TCP()
         pubkey := node.Pubkey()
 
-        // ----------------------------------------------------------
-        // ### CHANGE 1 ###  Safely parse eth2 data
-        // ----------------------------------------------------------
+        // parse eth2 data
         eth2Data, ok, parseErr := utils.ParseNodeEth2Data(*node)
         if parseErr != nil {
-            // If parse fails, you can skip the node or just set a blank struct:
-            log.Warnf("eth2 data parsing error on %s: %v", id, parseErr)
-            eth2Data = new(common.Eth2Data) // blank fallback
+            log.Warnf("eth2 data parse error on node %s: %v", id, parseErr)
+            eth2Data = new(common.Eth2Data)
         }
         if !ok {
-            // no eth2 data found
             eth2Data = new(common.Eth2Data)
         }
 
-        // ----------------------------------------------------------
-        // ### CHANGE 2 ###  Safely parse attnets
-        // ----------------------------------------------------------
+        // parse attnets
         attnets, ok, attErr := discv5.ParseAttnets(*node)
         if attErr != nil {
-            log.Warnf("attnets parsing error on %s: %v", id, attErr)
+            log.Warnf("attnets parse error on node %s: %v", id, attErr)
             attnets = new(discv5.Attnets)
         }
         if !ok {
             attnets = new(discv5.Attnets)
         }
 
-        // build the local struct
         enrNode := discv5.NewEnrNode(id)
         enrNode.Seq = seq
         enrNode.IP = ip
@@ -116,7 +141,6 @@ func New(
         enrNode.Eth2Data = eth2Data
         enrNode.Attnets = attnets
 
-        // log it
         log.WithFields(log.Fields{
             "node_id":     id,
             "ip":          ip,
@@ -129,14 +153,12 @@ func New(
             "enr":         node.String(),
         }).Info("Eth node found")
 
-        // decide whether to insert or update
+        // Instead of storing to DB, we just append to a file
         prevSeq, known := enrCache[enrNode.ID]
-        if !known {
-            sqlDB.InsertIntoDB(enrNode)
-        } else if enrNode.Seq > prevSeq {
-            sqlDB.UpdateInDB(enrNode)
+        if !known || enrNode.Seq > prevSeq {
+            saveENRToFile(enrNode)
+            enrCache[enrNode.ID] = enrNode.Seq
         }
-        enrCache[enrNode.ID] = enrNode.Seq
     }
 
     // spin up discv5
@@ -148,7 +170,6 @@ func New(
     return &Crawler{
         ctx:           ctx,
         ethNode:       ethNode,
-        dbClient:      sqlDB,
         discv5Service: discv5Serv,
         enrCache:      enrCache,
     }, nil
