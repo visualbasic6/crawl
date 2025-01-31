@@ -15,7 +15,6 @@ type Discv5Service struct {
     ctx         context.Context
     ethNode     *enode.LocalNode
     dv5Listener *discover.UDPv5
-    iterator    enode.Iterator
     enrHandler  func(*enode.Node)
 }
 
@@ -25,8 +24,7 @@ func NewService(
     privkey *ecdsa.PrivateKey,
     ethNode *enode.LocalNode,
     bootnodes []*enode.Node,
-    enrHandler func(*enode.Node),
-) (*Discv5Service, error) {
+    enrHandler func(*enode.Node)) (*Discv5Service, error) {
 
     if len(bootnodes) == 0 {
         return nil, errors.New("no bootnodes provided")
@@ -36,22 +34,21 @@ func NewService(
         IP:   net.IPv4zero,
         Port: port,
     }
+
     conn, err := net.ListenUDP("udp", udpAddr)
     if err != nil {
         return nil, err
     }
 
     gethLogger := gethlog.New()
-    gethLogger.SetHandler(gethlog.FuncHandler(func(r *gethlog.Record) error {
-        // No-op or debug
-        return nil
-    }))
+    gethLogger.SetHandler(gethlog.DiscardHandler())
 
     cfg := discover.Config{
         PrivateKey:   privkey,
+        NetRestrict:  nil,
         Bootnodes:    bootnodes,
-        ValidSchemes: enode.ValidSchemes,
         Log:          gethLogger,
+        ValidSchemes: enode.ValidSchemes,
     }
 
     dv5Listener, err := discover.ListenV5(conn, ethNode, cfg)
@@ -59,24 +56,24 @@ func NewService(
         return nil, err
     }
 
-    iter := dv5Listener.RandomNodes()
     return &Discv5Service{
         ctx:         ctx,
         ethNode:     ethNode,
         dv5Listener: dv5Listener,
-        iterator:    iter,
         enrHandler:  enrHandler,
     }, nil
 }
 
 func (dv5 *Discv5Service) Run() {
-    for {
-        if err := dv5.ctx.Err(); err != nil {
-            break
-        }
-        if dv5.iterator.Next() {
-            newNode := dv5.iterator.Node()
-            dv5.enrHandler(newNode)
+    iterator := dv5.dv5Listener.RandomNodes()
+    for iterator.Next() {
+        select {
+        case <-dv5.ctx.Done():
+            return
+        default:
+            if node := iterator.Node(); node != nil {
+                dv5.enrHandler(node)
+            }
         }
     }
 }

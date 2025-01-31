@@ -1,24 +1,49 @@
 package config
 
 import (
-    "time"
+	"time"
 
-    cli "github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v2"
 )
 
-// Basic config
 type Config struct {
-    UDP           int
-    CrawlDuration time.Duration
+	IP            string
+	UDP           int
+	TCP           int
+	LogLvl        string
+	DBPath        string
+	DBEndpoint    string
+	ResetDB       bool
+	CrawlDuration time.Duration
 }
 
-var DefaultConfig = Config{
-    UDP:           9001,
-    CrawlDuration: 0, // 0 means run forever
+var DefaultConfig Config = Config{
+	IP:            "0.0.0.0",
+	UDP:           9001,
+	TCP:           9001,
+	LogLvl:        "info",
+	DBPath:        "eth_nodes.peerstore",
+	DBEndpoint:    "test-endpoint",
+	ResetDB:       false,
+	CrawlDuration: 1 * time.Hour,
 }
 
 func (c *Config) Apply(ctx *cli.Context) {
-    if ctx.IsSet("port") {
-        c.UDP = ctx.Int("port")
-    }
+	// read log-level from the ctx
+	if ctx.IsSet("log-level") {
+		c.LogLvl = ctx.String("log-level")
+	}
+	// read the port from the ctx
+	if ctx.IsSet("port") {
+		port := ctx.Int("port")
+		c.UDP = port
+		c.TCP = port
+	}
+	if ctx.IsSet("db-endpoint") {
+		c.DBEndpoint = ctx.String("db-endpoint")
+	}
+	if ctx.IsSet("reset-db") {
+		c.ResetDB = ctx.Bool("reset-db")
+	}
+	// more args?
 }
